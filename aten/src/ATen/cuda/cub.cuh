@@ -568,4 +568,10 @@ void reduce(InputIteratorT input, OutputIteratorT output, int64_t num_items, Red
 
 }
 
+template <typename InputIteratorT, typename OutputIteratorT, typename TransformOpT>
+void transform(InputIteratorT input, OutputIteratorT output, int64_t num_items, TransformOpT op, cudaStream_t stream) {
+  AT_CUDA_CHECK(NO_ROCM(at_cuda_detail)::cub::DeviceTransform::Transform(
+      input, output, num_items, op, stream));
+}
+
 }  // namespace at::cuda::cub

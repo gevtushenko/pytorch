@@ -39,6 +39,7 @@
 #include <c10/core/ScalarType.h>
 #include <c10/macros/Macros.h>
 #include <c10/util/TypeCast.h>
+#include <ATen/cuda/cub.cuh>
 
 #ifdef __NVCC__
 #define ASSERT_HOST_DEVICE_LAMBDA(type)                       \
@@ -281,6 +282,28 @@ __global__ void unrolled_elementwise_kernel(
       unroll<array_t, inp_calc_t, out_calc_t, loader_t, storer_t, elems_per_thread>(
           data, remaining, ic, oc, l, s);
   elementwise_kernel_helper(f, policy);
+}
+
+// CUB-based transform using cub::DeviceTransform
+// This provides an alternative to custom vectorized kernels for simple unary operations
+// Only call this when traits::arity == 1 is guaranteed
+template <typename func_t, typename array_t>
+static inline void launch_cub_transform(
+    int64_t N,
+    const func_t& f,
+    array_t data) {
+  TORCH_INTERNAL_ASSERT(N > 0 && N <= std::numeric_limits<int32_t>::max());
+  using traits = function_traits<func_t>;
+  using arg0_t = typename traits::result_type;
+  using input_t = typename traits::template arg<0>::type;
+
+  // Extract typed pointers from the char* array
+  // data[0] = output, data[1] = first input
+  input_t* input_ptr = reinterpret_cast<input_t*>(data[1]);
+  arg0_t* output_ptr = reinterpret_cast<arg0_t*>(data[0]);
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+  at::cuda::cub::transform(input_ptr, output_ptr, N, f, stream);
 }
 
 // this function assume trivial 1d and no dynamic casting
@@ -654,7 +677,12 @@ void gpu_kernel_impl_nocast(TensorIteratorBase& iter, const func_t& f) {
   bool contiguous = iter.is_contiguous();
 
   if (contiguous) {
-    return launch_vectorized_kernel(numel, f, data);
+    // Use CUB/thrust for unary operations, fall back to vectorized kernel for binary+
+    if constexpr (traits::arity == 1) {
+      return launch_cub_transform(numel, f, data);
+    } else {
+      return launch_vectorized_kernel(numel, f, data);
+    }
   }
   auto offset_calc = ::make_offset_calculator<traits::arity + 1>(iter);
 #ifndef USE_ROCM
